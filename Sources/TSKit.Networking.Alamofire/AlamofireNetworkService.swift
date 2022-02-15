@@ -13,7 +13,7 @@ public class AlamofireNetworkService: AnyNetworkService {
 
     public var backgroundSessionCompletionHandler: (() -> Void)? {
         get {
-            return manager.backgroundCompletionHandler
+            manager.backgroundCompletionHandler
         }
         set {
             manager.backgroundCompletionHandler = newValue
@@ -34,11 +34,11 @@ public class AlamofireNetworkService: AnyNetworkService {
     /// When working in background all requests are handled by `URLSessionDownloadTask`s,
     /// otherwise `URLSessionDataTask` will be used.
     private var isBackground: Bool {
-        return manager.session.configuration.networkServiceType == .background
+        manager.session.configuration.networkServiceType == .background
     }
 
     private var defaultHeaders: [String : String]? {
-        return configuration.headers
+        configuration.headers
     }
 
     public required init(configuration: AnyNetworkServiceConfiguration,
@@ -56,7 +56,7 @@ public class AlamofireNetworkService: AnyNetworkService {
     }
     
     public func builder(for request: AnyRequestable) -> AnyRequestCallBuilder {
-        return AlamofireRequestCallBuilder(request: request)
+        AlamofireRequestCallBuilder(request: request)
     }
 
     public func request(_ requestCalls: [AnyRequestCall],
@@ -154,48 +154,24 @@ public class AlamofireNetworkService: AnyNetworkService {
     }
     
     /// Calls that are being processed currently.
+    @AsyncSynchronized(synchronizer: ConcurrentQueueSynchronizer())
     private var activeCalls: [AlamofireRequestCall] = []
     
     /// Calls that are pending recovery.
-    private var recoveringCalls: [AlamofireRequestCall] = []
-    
-    private let syncQueue = DispatchQueue(label: "ActiveCallsSynchronizedQueue", attributes: .concurrent)
+    @AsyncSynchronized(synchronizer: ConcurrentQueueSynchronizer())
+    private var pendingRecoveries = RecoveryItemDictionary()
     
     /// Finds an active `AlamofireRequestCall` that corresponds to given `request`.
     private func activeCall(for request: Alamofire.Request) -> AlamofireRequestCall? {
-        syncQueue.sync { activeCalls.first(where: { $0.originalRequest == request.task?.originalRequest }) }
+        activeCalls.first(where: { $0.originalRequest == request.task?.originalRequest })
     }
     
     private func addActiveCalls(_ calls: [AlamofireRequestCall]) {
-        syncQueue.async(flags: .barrier) {
-            self.activeCalls += calls
-        }
+        activeCalls += calls
     }
     
     private func removeActiveCall(_ call: AlamofireRequestCall) {
-        syncQueue.async(flags: .barrier) {
-            self.activeCalls.removeFirst(where: { $0.originalRequest == call.originalRequest })
-        }
-    }
-    
-    private func addRecoveringCall(_ call: AlamofireRequestCall) {
-        syncQueue.async(flags: .barrier) {
-            self.recoveringCalls.append(call)
-        }
-    }
-    
-    private func removeRecoveringCall(_ call: AlamofireRequestCall) {
-        syncQueue.async(flags: .barrier) {
-            self.recoveringCalls.removeFirst(where: { $0.originalRequest == call.originalRequest })
-        }
-    }
-    
-    /// Finds and removes an `AlamofireRequestCall` that is pending recovery that corresponds to given `request`.
-    private func popRecoveringCall(for request: URLRequest) -> AlamofireRequestCall? {
-        syncQueue.sync(flags: .barrier) { recoveringCalls.removeFirst(where: {
-            $0.originalRequest?.url == request.url &&
-            $0.originalRequest?.httpMethod == request.httpMethod
-        }) }
+        activeCalls.removeFirst(where: { $0.originalRequest == call.originalRequest })
     }
 }
 
@@ -786,6 +762,41 @@ private extension AlamofireNetworkService {
     }
 }
 
+// MARK: - Recovery support
+private extension AlamofireNetworkService {
+    
+    func recoverCall(_ call: AlamofireRequestCall,
+                     with response: HTTPURLResponse?,
+                     after error: Error,
+                     using recoverer: AnyNetworkServiceRecoverer,
+                     completion: @escaping RequestRetryCompletion) {
+        guard let request = call.originalRequest,
+              pendingRecoveries[request] == nil else { return completion(false, 0) }
+
+        pendingRecoveries[request] = .init(recoverer: recoverer, call: call)
+        log?.verbose(tag: self)("Recovering request \(call.request)")
+        recoverer.recover(call: call, response: response, error: error as? URLError, in: self) { [weak self] isRecovered in
+            if isRecovered {
+                call.recoveryAttempts += 1
+                self?.log?.verbose(tag: self)("Retrying request \(call.request). Attempt #\(call.recoveryAttempts). Retrying after response: \(String(describing: response)); error: \(error)")
+            } else {
+                self?.log?.verbose(tag: self)("No more retries for request \(call.request). Failing with response: \(String(describing: response)); error: \(error)")
+                self?.pendingRecoveries[request] = nil
+            }
+            completion(isRecovered, isRecovered ? 1 : 0)
+        }
+    }
+
+    /// Performs
+    func updateRequestAfterRecovery(_ request: inout URLRequest) {
+        guard let item = pendingRecoveries.removeValue(forKey: request) else { return }
+        
+        item.recoverer.update(request: &request,
+                              afterRecovering: item.call,
+                              in: self)
+    }
+}
+
 // MARK: - RequestRetrier
 extension AlamofireNetworkService: RequestRetrier {
     
@@ -801,19 +812,7 @@ extension AlamofireNetworkService: RequestRetrier {
             return completion(false, 0)
         }
         
-        addRecoveringCall(requestCall)
-        
-        log?.verbose(tag: self)("Recovering request \(requestCall.request)")
-        recoverer.recover(call: requestCall, response: request.response, error: error as? URLError, in: self) { [weak self] isRecovered in
-            if isRecovered {
-                requestCall.recoveryAttempts += 1
-                self?.log?.verbose(tag: self)("Retrying request \(requestCall.request). Attempt #\(requestCall.recoveryAttempts). Retrying after response: \(String(describing: request.response)); error: \(error)")
-            } else {
-                self?.log?.verbose(tag: self)("No more retries for request \(requestCall.request). Failing with response: \(String(describing: request.response)); error: \(error)")
-                self?.removeRecoveringCall(requestCall)
-            }
-            completion(isRecovered, isRecovered ? 1 : 0)
-        }
+        recoverCall(requestCall, with: request.response, after: error, using: recoverer, completion: completion)
     }
 }
 
@@ -821,20 +820,10 @@ extension AlamofireNetworkService: RequestRetrier {
 extension AlamofireNetworkService: RequestAdapter {
     
     public func adapt(_ urlRequest: URLRequest) throws -> URLRequest {
-        transform(urlRequest) {
-            $0.timeoutInterval = configuration.timeoutInterval ?? configuration.sessionConfiguration.timeoutIntervalForRequest
+        transform(urlRequest) { request in
+            request.timeoutInterval = configuration.timeoutInterval ?? configuration.sessionConfiguration.timeoutIntervalForRequest
             
-            // Re-apply headers in case those changed after recovery.
-            // Only do so if the call is recovering, otherwise request has been already configured.
-            if let call = popRecoveringCall(for: $0) {
-                log?.verbose(tag: self)("Updating headers for recovered request \(call.request)")
-                let headers = constructHeaders(withRequest: call.request)
-                for (headerField, headerValue) in headers {
-                    $0.setValue(headerValue, forHTTPHeaderField: headerField)
-                }
-               
-                // TODO: Add parameters invalidation as well, perhaps?
-            }
+            updateRequestAfterRecovery(&request)
         }
     }
 }
@@ -904,4 +893,46 @@ private struct PathEncoding: Alamofire.ParameterEncoding {
         urlRequest.url = try components.asURL()
         return urlRequest
     }
+}
+
+/// A custom struct that mimics Dictionary semantics for `[URLRequest: RecoveryItem]`.
+///
+/// It is used to implement custom equality logic for `URLRequest`s to only rely on `url` and `httpMethod`.
+private struct RecoveryItemDictionary {
+    
+    private var items: [RecoveryItem] = []
+    
+    subscript (_ key: URLRequest) -> RecoveryItem? {
+        get {
+            items.first(where: curry(requestEquals)(key))
+        }
+        set {
+            if let newValue = newValue {
+                if items.updateFirst(where: curry(requestEquals)(key), with: newValue) == nil {
+                    items.append(newValue)
+                }
+            } else {
+                _ = removeValue(forKey: key)
+            }
+        }
+    }
+    
+    mutating func removeValue(forKey key: URLRequest) -> RecoveryItem? {
+        items.removeFirst(where: curry(requestEquals)(key))
+    }
+    
+    private func requestEquals(_ lhs: URLRequest, _ rhs: RecoveryItem) -> Bool {
+        requestEquals(lhs, rhs.call.originalRequest)
+    }
+    
+    private func requestEquals(_ lhs: URLRequest?, _ rhs: URLRequest?) -> Bool {
+        lhs?.url == rhs?.url && lhs?.httpMethod == rhs?.httpMethod
+    }
+}
+    
+private struct RecoveryItem {
+    
+    let recoverer: AnyNetworkServiceRecoverer
+    
+    let call: AlamofireRequestCall
 }

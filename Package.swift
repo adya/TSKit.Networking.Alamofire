@@ -11,9 +11,9 @@ let package = Package(
             targets: ["TSKit.Networking.Alamofire"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/adya/TSKit.Core.git", .upToNextMajor(from: "2.3.0")),
+        .package(url: "https://github.com/adya/TSKit.Core.git", .upToNextMajor(from: "2.10.0")),
         .package(url: "https://github.com/adya/TSKit.Log.git", .upToNextMajor(from: "2.3.0")),
-        .package(url: "https://github.com/adya/TSKit.Networking.git", .upToNextMajor(from: "5.0.0")),
+        .package(url: "https://github.com/adya/TSKit.Networking.git", .upToNextMajor(from: "5.2.0")),
         .package(url: "https://github.com/Alamofire/Alamofire.git", .upToNextMajor(from: "4.0.0")),
         .package(url: "https://github.com/Quick/Nimble.git", .upToNextMajor(from: "9.0.0")),
         .package(url: "https://github.com/Quick/Quick.git", .upToNextMajor(from: "3.0.0")),
