@@ -1,4 +1,0 @@
-module CwlCatchExceptionSupport {
-    umbrella "/Users/adya/Projects/TSKit/TSKit.Networking.Alamofire/.build/checkouts/CwlCatchException/Sources/CwlCatchExceptionSupport/include"
-    export *
-}

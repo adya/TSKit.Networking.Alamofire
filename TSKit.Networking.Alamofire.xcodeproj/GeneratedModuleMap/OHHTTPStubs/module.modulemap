@@ -1,4 +1,0 @@
-module OHHTTPStubs {
-    umbrella "/Users/adya/Projects/TSKit/TSKit.Networking.Alamofire/.build/checkouts/OHHTTPStubs/Sources/OHHTTPStubs/include"
-    export *
-}
