@@ -41,18 +41,38 @@ public class AlamofireNetworkService: AnyNetworkService {
         configuration.headers
     }
 
-    public required init(configuration: AnyNetworkServiceConfiguration,
-                         recoverers: [AnyNetworkServiceRecoverer] = [],
-                         interceptors: [AnyNetworkServiceInterceptor] = [],
-                         log: AnyLogger?) {
-        manager = Alamofire.SessionManager(configuration: configuration.sessionConfiguration)
-        manager.startRequestsImmediately = false
+    internal init(manager: Alamofire.SessionManager,
+                  configuration: AnyNetworkServiceConfiguration,
+                  recoverers: [AnyNetworkServiceRecoverer],
+                  interceptors: [AnyNetworkServiceInterceptor],
+                  comparator: AnyURLRequestComparator?,
+                  log: AnyLogger?) {
+        self.manager = manager
         self.configuration = configuration
         self.recoverers = recoverers
         self.interceptors = interceptors
         self.log = log
-        manager.adapter = self
-        manager.retrier = self
+        if let comparator {
+            self.pendingRecoveries = RecoveryItemDictionary(comparator: comparator)
+        }
+
+        self.manager.startRequestsImmediately = false
+        self.manager.adapter = self
+        self.manager.retrier = self
+    }
+
+    /// - Parameter comparator: A custom comparator that compares two `URLRequest`s that can be recovered.
+    public convenience init(configuration: AnyNetworkServiceConfiguration,
+                            recoverers: [AnyNetworkServiceRecoverer] = [],
+                            interceptors: [AnyNetworkServiceInterceptor] = [],
+                            comparator: AnyURLRequestComparator?,
+                            log: AnyLogger?) {
+        self.init(manager: Alamofire.SessionManager(configuration: configuration.sessionConfiguration),
+                  configuration: configuration,
+                  recoverers: recoverers,
+                  interceptors: interceptors,
+                  comparator: comparator,
+                  log: log)
     }
     
     public func builder(for request: AnyRequestable) -> AnyRequestCallBuilder {
@@ -159,7 +179,7 @@ public class AlamofireNetworkService: AnyNetworkService {
     
     /// Calls that are pending recovery.
     @AsyncSynchronized(synchronizer: ConcurrentQueueSynchronizer())
-    private var pendingRecoveries = RecoveryItemDictionary()
+    private var pendingRecoveries = RecoveryItemDictionary(comparator: URLRequestComparator())
     
     /// Finds an active `AlamofireRequestCall` that corresponds to given `request`.
     private func activeCall(for request: Alamofire.Request) -> AlamofireRequestCall? {
@@ -901,7 +921,14 @@ private struct PathEncoding: Alamofire.ParameterEncoding {
 private struct RecoveryItemDictionary {
     
     private var items: [RecoveryItem] = []
-    
+
+    private let comparator: AnyURLRequestComparator
+
+    init(comparator: AnyURLRequestComparator) {
+        self.items = []
+        self.comparator = comparator
+    }
+
     subscript (_ key: URLRequest) -> RecoveryItem? {
         get {
             items.first(where: curry(requestEquals)(key))
@@ -922,11 +949,8 @@ private struct RecoveryItemDictionary {
     }
     
     private func requestEquals(_ lhs: URLRequest, _ rhs: RecoveryItem) -> Bool {
-        requestEquals(lhs, rhs.call.originalRequest)
-    }
-    
-    private func requestEquals(_ lhs: URLRequest?, _ rhs: URLRequest?) -> Bool {
-        lhs?.url == rhs?.url && lhs?.httpMethod == rhs?.httpMethod
+        guard let rhs = rhs.call.originalRequest else { return false }
+        return comparator.equals(lhs, rhs)
     }
 }
     
@@ -935,4 +959,17 @@ private struct RecoveryItem {
     let recoverer: AnyNetworkServiceRecoverer
     
     let call: AlamofireRequestCall
+}
+
+public protocol AnyURLRequestComparator {
+
+    func equals(_ lhs: URLRequest, _ rhs: URLRequest) -> Bool
+}
+
+private struct URLRequestComparator: AnyURLRequestComparator {
+
+    func equals(_ lhs: URLRequest, _ rhs: URLRequest) -> Bool {
+        lhs.url == rhs.url &&
+        lhs.httpMethod == rhs.httpMethod
+    }
 }
