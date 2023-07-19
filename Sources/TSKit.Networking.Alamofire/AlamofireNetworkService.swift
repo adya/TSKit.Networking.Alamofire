@@ -101,13 +101,15 @@ public class AlamofireNetworkService: AnyNetworkService {
         case .executeAsynchronously(let ignoreFailures):
             let group = completion != nil ? DispatchGroup() : nil
             var requests: [RequestWrapper] = []
-            requests = calls.map {
-                process($0) { result in
+            requests = calls.enumerated().map { index, current in
+                process(current) { result in
                     group?.leave()
                     if !ignoreFailures,
                        case .failure = result,
                        case .success = capturedResult {
-                        requests.forEach { $0.request?.cancel() }
+                        requests.removing(at: index)                // do not attempt to cancel the request that failed.
+                                .filter { $0.request?.task != nil } // a safe measure to avoid cancelling already cancelled tasks
+                                .forEach { $0.request?.cancel() }
                         capturedResult = result
                     }
                 }
