@@ -272,8 +272,8 @@ private extension AlamofireNetworkService {
                            })
             return wrapper
         } else if call.request is AnyFileRequestable || isBackground {
-            let destination: DownloadRequest.DownloadFileDestination = { [weak self] tempFileURL, _ in
-                let directory = self?.configuration.sessionTemporaryFilesDirectory
+            let destination: DownloadRequest.DownloadFileDestination = { [configuration] tempFileURL, _ in
+                let directory = configuration.sessionTemporaryFilesDirectory
                     ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
                     ?? {
                         if #available(iOS 10.0, *) {
@@ -337,7 +337,7 @@ private extension AlamofireNetworkService {
     }
 
     func constructHeaders(withRequest request: AnyRequestable) -> [String : String] {
-        return (defaultHeaders ?? [:]) + (request.headers ?? [:])
+        (defaultHeaders ?? [:]).filter { !request.ignoredDefaultHeaders.contains($0.key) } + (request.headers ?? [:])
     }
 }
 
